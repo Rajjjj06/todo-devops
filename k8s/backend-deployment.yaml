@@ -15,7 +15,7 @@ spec:
     spec:
       containers:
       - name: backend
-        image: 776312084376.dkr.ecr.ap-south-2.amazonaws.com/todo-backend:aec43a9a5c7305c857b9c01f553aca960df209b5
+        image: 776312084376.dkr.ecr.ap-south-2.amazonaws.com/todo-backend:d58ffbc0c1423a44396b2191b74e403f254b0a7f
         ports:
         - containerPort: 4000
         envFrom:
