@@ -17,7 +17,7 @@ spec:
       - name: ecr-secret
       containers:
       - name: backend
-        image: 776312084376.dkr.ecr.ap-south-2.amazonaws.com/todo-backend:05d3cbe1b9a94827ce8f98d1b9e976aef9615f1a
+        image: 776312084376.dkr.ecr.ap-south-2.amazonaws.com/todo-backend:038cb03526b99cb6595eb5c581061020b2aca72f
         ports:
         - containerPort: 4000
         envFrom:
