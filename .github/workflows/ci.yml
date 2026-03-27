@@ -1,0 +1,146 @@
+name: CI-CD Pipeline
+
+permissions:
+  contents: write
+
+on: 
+  push: 
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs: 
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    steps: 
+      - uses: actions/checkout@v3
+
+      - name: Setting up Node js 
+        uses: actions/setup-node@v3
+        with: 
+          node-version: 18
+
+      - name: Install and Test Backend
+        working-directory: ./backend
+        run: |
+          npm install
+          npm test --if-present
+
+      - name: Install and Test Frontend
+        working-directory: ./frontend
+        run: |
+          npm install
+          npm test --if-present
+          npm run build
+
+  scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: test
+    steps: 
+      - uses: actions/checkout@v3
+
+      - name: Scan for hardcoded secrets
+        uses: gitleaks/gitleaks-action@v2
+        env: 
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Scan backend dependencies
+        working-directory: ./backend
+        run: npm audit --audit-level=high || true
+
+      - name: Scan frontend dependencies
+        working-directory: ./frontend
+        run: npm audit --audit-level=high || true
+
+  build: 
+    name: Build and Push 
+    runs-on: ubuntu-latest
+    needs: scan
+    steps: 
+      - uses: actions/checkout@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      # ── NOTE: Removed K8s secret generation from here ──
+      # Generating your k8s/secret.yaml in the CI and doing `git add k8s/`
+      # will commit your plaintext GitHub secrets directly into the Git repository.
+      # This is a major security flaw. You should apply secrets manually using kubectl
+      # or use SealedSecrets/SOPS for GitOps.
+      # ── Backend ──
+      - name: Build backend image
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          TAG: ${{ github.sha }}
+        run: |
+          docker build -t $REGISTRY/todo-backend:$TAG ./backend
+          docker build -t $REGISTRY/todo-backend:latest ./backend
+
+      - name: Scan backend image with Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ steps.login-ecr.outputs.registry }}/todo-backend:${{ github.sha }}
+          severity: CRITICAL,HIGH
+          exit-code: 0        
+
+      - name: Push backend image
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          TAG: ${{ github.sha }}
+        run: |
+          docker push $REGISTRY/todo-backend:$TAG
+          docker push $REGISTRY/todo-backend:latest  
+
+      # ── Frontend ──
+      - name: Build frontend image
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          TAG: ${{ github.sha }}
+          VITE_API_URL: ${{ secrets.VITE_API_URL }}
+        run: |
+          docker build \
+            --build-arg VITE_API_URL=$VITE_API_URL \
+            -t $REGISTRY/todo-frontend:$TAG ./frontend
+          docker build \
+            --build-arg VITE_API_URL=$VITE_API_URL \
+            -t $REGISTRY/todo-frontend:latest ./frontend
+
+      - name: Scan frontend image with Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ steps.login-ecr.outputs.registry }}/todo-frontend:${{ github.sha }}
+          severity: CRITICAL,HIGH
+          exit-code: 0
+
+      - name: Push frontend image
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          TAG: ${{ github.sha }}
+        run: |
+          docker push $REGISTRY/todo-frontend:$TAG
+          docker push $REGISTRY/todo-frontend:latest 
+
+      # ── Update K8s manifests ──
+      - name: Update image tags in K8s manifests
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          TAG: ${{ github.sha }}
+        run: |
+          sed -i "s|todo-backend:.*|todo-backend:$TAG|" k8s/backend-deployment.yaml
+          sed -i "s|todo-frontend:.*|todo-frontend:$TAG|" k8s/frontend-deployment.yaml
+          git config user.email "ci@github.com"
+          git config user.name "GitHub Actions"
+          # explicitly only add deployment manifests to avoid committing secrets
+          git add k8s/backend-deployment.yaml k8s/frontend-deployment.yaml
+          git diff --staged --quiet || git commit -m "ci: update image tags to $TAG"
+          git push
