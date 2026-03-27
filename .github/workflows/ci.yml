@@ -158,7 +158,13 @@ jobs:
         env:
           KUBECONFIG: ${{ secrets.KUBECONFIG }}
 
-      - name: Apply all manifests to cluster
+      - name: Apply namespace manifest first
         env:
           KUBECONFIG: ${{ github.workspace }}/kubeconfig.yaml
-        run: kubectl apply -f k8s/
+        run: kubectl apply -f k8s/namespace.yaml
+
+      - name: Apply all other manifests
+        env:
+          KUBECONFIG: ${{ github.workspace }}/kubeconfig.yaml
+        run: |
+          kubectl apply -f k8s/ --recursive --selector='!metadata.name=namespace'
