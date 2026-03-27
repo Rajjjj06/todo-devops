@@ -153,8 +153,12 @@ jobs:
         with:
           version: "latest"
 
-      - name: Apply all manifests to cluster
+      - name: Write kubeconfig to file
+        run: echo "$KUBECONFIG" > kubeconfig.yaml
         env:
           KUBECONFIG: ${{ secrets.KUBECONFIG }}
-        run: |
-          kubectl apply -f k8s/
+
+      - name: Apply all manifests to cluster
+        env:
+          KUBECONFIG: ${{ github.workspace }}/kubeconfig.yaml
+        run: kubectl apply -f k8s/
