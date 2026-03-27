@@ -17,7 +17,7 @@ spec:
       - name: ecr-secret
       containers:
       - name: frontend
-        image: 776312084376.dkr.ecr.ap-south-2.amazonaws.com/todo-frontend:0f511018e770e8b22686f4143d66977a9c54751a
+        image: 776312084376.dkr.ecr.ap-south-2.amazonaws.com/todo-frontend:359e08c81d423705d01290f186be70fb3aac1dd3
         ports:
         - containerPort: 80
         resources:
