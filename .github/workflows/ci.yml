@@ -166,5 +166,4 @@ jobs:
       - name: Apply all other manifests
         env:
           KUBECONFIG: ${{ github.workspace }}/kubeconfig.yaml
-        run: |
-          kubectl apply -f k8s/ --recursive --selector='!metadata.name=namespace'
+        run: kubectl apply -f k8s/
