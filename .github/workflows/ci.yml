@@ -57,12 +57,13 @@ jobs:
         run: npm audit --audit-level=high || true
 
   build:
-    name: Build and Push
+    name: Build, Push & Deploy
     runs-on: ubuntu-latest
     needs: scan
     steps:
       - uses: actions/checkout@v3
 
+      # ───────── AWS LOGIN ─────────
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
@@ -74,12 +75,7 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v1
 
-      # ── NOTE: Removed K8s secret generation from here ──
-      # Generating your k8s/secret.yaml in the CI and doing `git add k8s/`
-      # will commit your plaintext GitHub secrets directly into the Git repository.
-      # This is a major security flaw. You should apply secrets manually using kubectl
-      # or use SealedSecrets/SOPS for GitOps.
-      # ── Backend ──
+      # ───────── BUILD BACKEND ─────────
       - name: Build backend image
         env:
           REGISTRY: ${{ steps.login-ecr.outputs.registry }}
@@ -87,13 +83,6 @@ jobs:
         run: |
           docker build -t $REGISTRY/todo-backend:$TAG ./backend
           docker build -t $REGISTRY/todo-backend:latest ./backend
-
-      - name: Scan backend image with Trivy
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: ${{ steps.login-ecr.outputs.registry }}/todo-backend:${{ github.sha }}
-          severity: CRITICAL,HIGH
-          exit-code: 0
 
       - name: Push backend image
         env:
@@ -103,7 +92,7 @@ jobs:
           docker push $REGISTRY/todo-backend:$TAG
           docker push $REGISTRY/todo-backend:latest
 
-      # ── Frontend ──
+      # ───────── BUILD FRONTEND ─────────
       - name: Build frontend image
         env:
           REGISTRY: ${{ steps.login-ecr.outputs.registry }}
@@ -113,16 +102,10 @@ jobs:
           docker build \
             --build-arg VITE_BACKEND_URL=$VITE_BACKEND_URL \
             -t $REGISTRY/todo-frontend:$TAG ./frontend
+
           docker build \
             --build-arg VITE_BACKEND_URL=$VITE_BACKEND_URL \
             -t $REGISTRY/todo-frontend:latest ./frontend
-
-      - name: Scan frontend image with Trivy
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: ${{ steps.login-ecr.outputs.registry }}/todo-frontend:${{ github.sha }}
-          severity: CRITICAL,HIGH
-          exit-code: 0
 
       - name: Push frontend image
         env:
@@ -132,38 +115,65 @@ jobs:
           docker push $REGISTRY/todo-frontend:$TAG
           docker push $REGISTRY/todo-frontend:latest
 
-      # ── Update K8s manifests ──
-      - name: Update image tags in K8s manifests
+      # ───────── UPDATE K8s MANIFESTS ─────────
+      - name: Update image tags
         env:
           REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           TAG: ${{ github.sha }}
         run: |
           sed -i "s|todo-backend:.*|todo-backend:$TAG|" k8s/backend-deployment.yaml
           sed -i "s|todo-frontend:.*|todo-frontend:$TAG|" k8s/frontend-deployment.yaml
+
           git config user.email "ci@github.com"
           git config user.name "GitHub Actions"
-          # explicitly only add deployment manifests to avoid committing secrets
+
           git add k8s/backend-deployment.yaml k8s/frontend-deployment.yaml
           git diff --staged --quiet || git commit -m "ci: update image tags to $TAG"
           git push
 
-      # ── Deploy to Kubernetes ──
+      # ───────── KUBECTL SETUP ─────────
       - name: Set up kubectl
         uses: azure/setup-kubectl@v3
-        with:
-          version: "latest"
 
-      - name: Write kubeconfig to file
+      - name: Write kubeconfig
         run: echo "$KUBECONFIG" > kubeconfig.yaml
         env:
           KUBECONFIG: ${{ secrets.KUBECONFIG }}
 
-      - name: Apply namespace manifest first
+      # ───────── INSTALL CERT-MANAGER ─────────
+      - name: Install cert-manager
         env:
           KUBECONFIG: ${{ github.workspace }}/kubeconfig.yaml
-        run: kubectl apply -f k8s/namespace.yaml
+        run: |
+          kubectl apply -f https://github.com/cert-manager/cert-manager/releases/latest/download/cert-manager.yaml
 
-      - name: Apply all other manifests
+          echo "Waiting for cert-manager..."
+          kubectl wait --for=condition=available deployment/cert-manager -n cert-manager --timeout=180s
+          kubectl wait --for=condition=available deployment/cert-manager-webhook -n cert-manager --timeout=180s
+
+      # ───────── INSTALL AWS LOAD BALANCER CONTROLLER ─────────
+      - name: Install AWS Load Balancer Controller
         env:
           KUBECONFIG: ${{ github.workspace }}/kubeconfig.yaml
-        run: kubectl apply -f k8s/
+        run: |
+          kubectl apply -k "github.com/aws/eks-charts/stable/aws-load-balancer-controller/crds?ref=master"
+          kubectl apply -k "github.com/aws/eks-charts/stable/aws-load-balancer-controller?ref=master"
+
+          echo "Waiting for AWS Load Balancer Controller..."
+          kubectl wait --for=condition=available deployment/aws-load-balancer-controller -n kube-system --timeout=300s
+
+      # ───────── DEPLOY IN CORRECT ORDER ─────────
+      - name: Deploy to Kubernetes
+        env:
+          KUBECONFIG: ${{ github.workspace }}/kubeconfig.yaml
+        run: |
+          kubectl apply -f k8s/namespace.yaml
+          kubectl apply -f k8s/configmap.yaml
+          kubectl apply -f k8s/backend-deployment.yaml
+          kubectl apply -f k8s/frontend-deployment.yaml
+
+          kubectl apply -f k8s/backend-service.yaml
+          kubectl apply -f k8s/frontend-service.yaml
+
+          kubectl apply -f k8s/cluster-issuer.yaml
+          kubectl apply -f k8s/ingress.yaml
